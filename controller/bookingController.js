@@ -1,0 +1,169 @@
+const Booking = require("../models/Booking");
+const Room = require("../models/Room");
+const User = require("../models/User");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const nodemailer = require("nodemailer");
+const dotenv = require("dotenv");
+
+dotenv.config(); // Load environment variables from .env
+
+// Email Configuration for Mailtrap
+const transporter = nodemailer.createTransport({
+  host: process.env.MAIL_HOST, // 'sandbox.smtp.mailtrap.io'
+  port: process.env.MAIL_PORT, // 2525 (or 25, 465, 587 if needed)
+  auth: {
+    user: process.env.MAIL_USER, // Mailtrap Username (e.g., c38e66e7edcd5a)
+    pass: process.env.MAIL_PASS, // Mailtrap Password (e.g., 6d9771ca8421f5)
+  },
+  tls: {
+    rejectUnauthorized: false, // To prevent TLS certificate errors
+  },
+});
+
+// Create Booking with Payment
+const createBooking = async (req, res) => {
+  const { userId, roomId, startDate, endDate, totalPrice, paymentMethodId } =
+    req.body;
+
+  try {
+    // Step 1: Validate Room
+    const room = await Room.findById(roomId);
+    if (!room) {
+      return res.status(404).json({ message: "Room not found" });
+    }
+
+    // Step 2: Check Availability
+    const existingBooking = await Booking.findOne({
+      roomId,
+      $or: [
+        {
+          startDate: { $lt: new Date(endDate) },
+          endDate: { $gt: new Date(startDate) },
+        },
+      ],
+    });
+
+    if (existingBooking) {
+      return res
+        .status(400)
+        .json({ message: "Room is not available for the selected dates" });
+    }
+
+    // Step 3: Process Payment using Stripe
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: totalPrice * 100, // Convert dollars to cents
+      currency: "usd",
+      payment_method: paymentMethodId,
+      confirm: true,
+      automatic_payment_methods: { enabled: true, allow_redirects: "never" },
+    });
+
+    if (paymentIntent.status !== "succeeded") {
+      return res.status(400).json({ message: "Payment failed" });
+    }
+
+    // Step 4: Create Booking
+    const booking = new Booking({
+      userId,
+      roomId,
+      startDate,
+      endDate,
+      totalPrice,
+      status: "Confirmed",
+      paymentId: paymentIntent.id,
+    });
+
+    await booking.save();
+
+    // Step 5: Mark Room as Unavailable
+    room.available = false;
+    await room.save();
+
+    // Step 6: Send Booking Confirmation Email
+    const user = await User.findById(userId);
+    if (user) {
+      try {
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: user.email,
+          subject: "Booking Confirmation",
+          text: `Hello ${user.name},\n\nYour booking for ${room.name} is confirmed.\nTotal Price: $${totalPrice}\nFrom: ${startDate} to ${endDate}.\n\nThank you for choosing us!`,
+        });
+      } catch (emailError) {
+        console.error("Error sending email:", emailError);
+      }
+    }
+
+    res.status(201).json({ message: "Booking successful", booking });
+  } catch (err) {
+    console.error("Error creating booking:", err);
+    res
+      .status(500)
+      .json({ message: "Error creating booking", error: err.message });
+  }
+};
+
+// Cancel Booking
+const cancelBooking = async (req, res) => {
+  const { bookingId } = req.params;
+
+  try {
+    // Find the Booking
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    // Mark Booking as "Cancelled"
+    booking.status = "Cancelled";
+    await booking.save();
+
+    // Mark Room as Available Again
+    const room = await Room.findById(booking.roomId);
+    if (room) {
+      room.available = true;
+      await room.save();
+    }
+
+    // Send Cancellation Email
+    const user = await User.findById(booking.userId);
+    if (user) {
+      try {
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: user.email,
+          subject: "Booking Cancelled",
+          text: `Hello ${user.name},\n\nYour booking for ${room.name} has been cancelled.\n\nSorry to see you go!`,
+        });
+      } catch (emailError) {
+        console.error("Error sending email:", emailError);
+      }
+    }
+
+    res
+      .status(200)
+      .json({ message: "Booking cancelled successfully", booking });
+  } catch (err) {
+    console.error("Error cancelling booking:", err);
+    res
+      .status(500)
+      .json({ message: "Error cancelling booking", error: err.message });
+  }
+};
+
+// Get All Bookings for a User (This function was missing)
+const getUserBookings = async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    const bookings = await Booking.find({ userId }).populate("roomId");
+    res.status(200).json(bookings);
+  } catch (err) {
+    console.error("Error fetching bookings:", err);
+    res
+      .status(500)
+      .json({ message: "Error fetching bookings", error: err.message });
+  }
+};
+
+module.exports = { createBooking, cancelBooking, getUserBookings };
