@@ -7,6 +7,14 @@ const bookingSchema = new mongoose.Schema({
   endDate: { type: Date, required: true },
   totalPrice: { type: Number, required: true },
   status: { type: String, default: "Booked" },
+  clientDetails: {
+    firstName: String,
+    lastName: String,
+    age: Number,
+    country: String,
+    mobile: String,
+  },
+  paymentMethod: { type: String, default: "Cash" },
 });
 
 module.exports = mongoose.model("Booking", bookingSchema);
